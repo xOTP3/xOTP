@@ -1,5 +1,6 @@
 import express from 'express';
-import { Bot, InlineKeyboard, Context, session, SessionFlavor } from 'grammy';
+import pkg from 'grammy';
+const { Bot, InlineKeyboard, Context, session, SessionFlavor } = pkg;
 import axios from 'axios';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
