@@ -1,0 +1,6 @@
+{
+  "name": "OTP Sniffer Bot",
+  "description": "A high-performance Telegram bot for live SMS monitoring and target tracking, migrated from Railway.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
